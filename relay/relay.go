@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/fosrl/gerbil/internal/telemetry"
 	"github.com/fosrl/gerbil/logger"
 	"golang.org/x/crypto/chacha20poly1305"
 	"golang.org/x/crypto/curve25519"
@@ -187,8 +188,10 @@ func (s *UDPProxyServer) readPackets() {
 		n, remoteAddr, err := s.conn.ReadFromUDP(buf)
 		if err != nil {
 			logger.Error("Error reading UDP packet: %v", err)
+			telemetry.RecordRelaySocketError("read")
 			continue
 		}
+		telemetry.RecordRelayPacket("ingress", "relayed")
 		s.packetChan <- Packet{data: buf[:n], remoteAddr: remoteAddr, n: n}
 	}
 }
@@ -205,6 +208,7 @@ func (s *UDPProxyServer) packetWorker() {
 			var encMsg EncryptedHolePunchMessage
 			if err := json.Unmarshal(packet.data, &encMsg); err != nil {
 				logger.Error("Error unmarshaling encrypted message: %v", err)
+				telemetry.RecordHolepunchAttempt("failure", "unmarshal")
 				// Return the buffer to the pool for reuse and continue with next packet
 				bufferPool.Put(packet.data[:1500])
 				continue
@@ -212,6 +216,7 @@ func (s *UDPProxyServer) packetWorker() {
 
 			if encMsg.EphemeralPublicKey == "" {
 				logger.Error("Received malformed message without ephemeral key")
+				telemetry.RecordHolepunchAttempt("failure", "missing_key")
 				// Return the buffer to the pool for reuse and continue with next packet
 				bufferPool.Put(packet.data[:1500])
 				continue
@@ -221,6 +226,7 @@ func (s *UDPProxyServer) packetWorker() {
 			decryptedData, err := s.decryptMessage(encMsg)
 			if err != nil {
 				logger.Error("Failed to decrypt message: %v", err)
+				telemetry.RecordHolepunchAttempt("failure", "decrypt")
 				// Return the buffer to the pool for reuse and continue with next packet
 				bufferPool.Put(packet.data[:1500])
 				continue
@@ -230,10 +236,13 @@ func (s *UDPProxyServer) packetWorker() {
 			var msg HolePunchMessage
 			if err := json.Unmarshal(decryptedData, &msg); err != nil {
 				logger.Error("Error unmarshaling decrypted message: %v", err)
+				telemetry.RecordHolepunchAttempt("failure", "decode")
 				// Return the buffer to the pool for reuse and continue with next packet
 				bufferPool.Put(packet.data[:1500])
 				continue
 			}
+
+			telemetry.RecordHolepunchAttempt("success", "")
 
 			endpoint := ClientEndpoint{
 				NewtID:      msg.NewtID,
@@ -392,8 +401,12 @@ func (s *UDPProxyServer) handleWireGuardPacket(packet []byte, remoteAddr *net.UD
 
 			_, err = conn.Write(packet)
 			if err != nil {
+				telemetry.RecordRelaySocketError("write")
+				telemetry.RecordRelayPacket("egress", "dropped")
 				logger.Error("Failed to forward handshake initiation: %v", err)
+				continue
 			}
+			telemetry.RecordRelayPacket("egress", "relayed")
 		}
 
 	case WireGuardMessageTypeHandshakeResponse:
@@ -428,8 +441,12 @@ func (s *UDPProxyServer) handleWireGuardPacket(packet []byte, remoteAddr *net.UD
 
 			_, err = conn.Write(packet)
 			if err != nil {
+				telemetry.RecordRelaySocketError("write")
+				telemetry.RecordRelayPacket("egress", "dropped")
 				logger.Error("Failed to forward handshake response: %v", err)
+				continue
 			}
+			telemetry.RecordRelayPacket("egress", "relayed")
 		}
 
 	case WireGuardMessageTypeTransportData:
@@ -467,7 +484,11 @@ func (s *UDPProxyServer) handleWireGuardPacket(packet []byte, remoteAddr *net.UD
 
 			_, err = conn.Write(packet)
 			if err != nil {
+				telemetry.RecordRelaySocketError("write")
+				telemetry.RecordRelayPacket("egress", "dropped")
 				logger.Debug("Failed to forward transport data: %v", err)
+			} else {
+				telemetry.RecordRelayPacket("egress", "relayed")
 			}
 		} else {
 			// No known session, fall back to forwarding to all peers
@@ -490,8 +511,12 @@ func (s *UDPProxyServer) handleWireGuardPacket(packet []byte, remoteAddr *net.UD
 
 				_, err = conn.Write(packet)
 				if err != nil {
+					telemetry.RecordRelaySocketError("write")
+					telemetry.RecordRelayPacket("egress", "dropped")
 					logger.Debug("Failed to forward transport data: %v", err)
+					continue
 				}
+				telemetry.RecordRelayPacket("egress", "relayed")
 			}
 		}
 
@@ -515,8 +540,12 @@ func (s *UDPProxyServer) handleWireGuardPacket(packet []byte, remoteAddr *net.UD
 
 			_, err = conn.Write(packet)
 			if err != nil {
+				telemetry.RecordRelaySocketError("write")
+				telemetry.RecordRelayPacket("egress", "dropped")
 				logger.Error("Failed to forward WireGuard packet: %v", err)
+				continue
 			}
+			telemetry.RecordRelayPacket("egress", "relayed")
 		}
 	}
 }
@@ -555,6 +584,7 @@ func (s *UDPProxyServer) handleResponses(conn *net.UDPConn, destAddr *net.UDPAdd
 		n, err := conn.Read(buffer)
 		if err != nil {
 			logger.Debug("Error reading response from %s: %v", destAddr.String(), err)
+			telemetry.RecordRelaySocketError("read")
 			return
 		}
 
@@ -580,8 +610,12 @@ func (s *UDPProxyServer) handleResponses(conn *net.UDPConn, destAddr *net.UDPAdd
 		// Forward the response back through the main listener
 		_, err = s.conn.WriteToUDP(buffer[:n], remoteAddr)
 		if err != nil {
+			telemetry.RecordRelaySocketError("write")
+			telemetry.RecordRelayPacket("egress", "dropped")
 			logger.Error("Failed to forward response: %v", err)
+			continue
 		}
+		telemetry.RecordRelayPacket("egress", "relayed")
 	}
 }
 

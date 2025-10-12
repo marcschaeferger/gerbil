@@ -2,7 +2,9 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -17,6 +19,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/fosrl/gerbil/internal/telemetry"
 	"github.com/fosrl/gerbil/logger"
 	"github.com/fosrl/gerbil/proxy"
 	"github.com/fosrl/gerbil/relay"
@@ -65,6 +68,8 @@ var (
 	wgClient *wgctrl.Client
 )
 
+var version = "dev"
+
 // Add this new type at the top with other type definitions
 type ClientEndpoint struct {
 	OlmID     string `json:"olmId"`
@@ -107,6 +112,13 @@ func parseLogLevel(level string) logger.LogLevel {
 	}
 }
 
+func getenv(key, def string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return def
+}
+
 func main() {
 	var (
 		err                  error
@@ -124,6 +136,8 @@ func main() {
 		trustedUpstreamsStr  string
 		proxyProtocol        bool
 	)
+
+	ctx := context.Background()
 
 	interfaceName = os.Getenv("INTERFACE")
 	configFile = os.Getenv("CONFIG")
@@ -215,6 +229,32 @@ func main() {
 	logger.Init()
 	logger.GetLogger().SetLevel(parseLogLevel(logLevel))
 
+	hostname, hostErr := os.Hostname()
+	if hostErr != nil {
+		hostname = "unknown"
+	}
+	telemetryShutdown, telErr := telemetry.Init(ctx, telemetry.Config{
+		ServiceName:    "gerbil",
+		ServiceVersion: version,
+		InstanceID:     hostname,
+		Environment:    getenv("GERBIL_ENVIRONMENT", ""),
+		Exporter:       getenv("GERBIL_METRICS_EXPORTER", "prom"),
+		Prometheus: telemetry.PromConfig{
+			Addr: getenv("GERBIL_PROMETHEUS_ADDR", ":9464"),
+			Path: getenv("GERBIL_PROMETHEUS_PATH", "/metrics"),
+		},
+		OTLP: telemetry.OTLPConfig{
+			Endpoint: getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://otel-collector:4318"),
+			Insecure: strings.EqualFold(getenv("GERBIL_OTLP_INSECURE", "true"), "true"),
+		},
+	})
+	if telErr != nil {
+		logger.Warn("Telemetry initialisation failed: %v", telErr)
+	} else {
+		defer telemetryShutdown(context.Background())
+		telemetry.IncRestartCount()
+	}
+
 	mtuInt, err = strconv.Atoi(mtu)
 	if err != nil {
 		logger.Fatal("Failed to parse MTU: %v", err)
@@ -298,6 +338,36 @@ func main() {
 	}
 	defer wgClient.Close()
 
+	telemetry.SetWireGuardSnapshotter(func(ctx context.Context) ([]telemetry.WireGuardSnapshot, error) {
+		wgMu.Lock()
+		defer wgMu.Unlock()
+
+		device, err := wgClient.Device(interfaceName)
+		if err != nil {
+			return nil, err
+		}
+
+		snapshot := telemetry.WireGuardSnapshot{Interface: interfaceName}
+		if link, linkErr := netlink.LinkByName(interfaceName); linkErr == nil && link != nil {
+			snapshot.Up = (link.Attrs().Flags & net.FlagUp) != 0
+		}
+
+		now := time.Now()
+		for _, peer := range device.Peers {
+			connected := false
+			if !peer.LastHandshakeTime.IsZero() && now.Sub(peer.LastHandshakeTime) < 3*time.Minute {
+				connected = true
+			}
+			snapshot.Peers = append(snapshot.Peers, telemetry.WireGuardPeerSnapshot{
+				PublicKey:  peer.PublicKey.String(),
+				Connected:  connected,
+				AllowedIPs: len(peer.AllowedIPs),
+			})
+		}
+
+		return []telemetry.WireGuardSnapshot{snapshot}, nil
+	})
+
 	// Ensure the WireGuard interface exists and is configured
 	if err := ensureWireguardInterface(wgconfig); err != nil {
 		logger.Fatal("Failed to ensure WireGuard interface: %v", err)
@@ -368,6 +438,7 @@ func main() {
 }
 
 func loadRemoteConfig(url string, key wgtypes.Key, reachableAt string) (WgConfig, error) {
+	start := time.Now()
 	var body *bytes.Buffer
 	if reachableAt == "" {
 		body = bytes.NewBuffer([]byte(fmt.Sprintf(`{"publicKey": "%s"}`, key.PublicKey().String())))
@@ -378,17 +449,37 @@ func loadRemoteConfig(url string, key wgtypes.Key, reachableAt string) (WgConfig
 	if err != nil {
 		// print the error
 		logger.Error("Error fetching remote config %s: %v", url, err)
+		telemetry.RecordRemoteConfigError(classifyRemoteConfigError(err))
+		telemetry.RecordRemoteConfigFetch("failure", time.Since(start))
+		telemetry.RecordConfigReload("failure")
 		return WgConfig{}, err
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode != http.StatusOK {
+		telemetry.RecordRemoteConfigError(fmt.Sprintf("status_%d", resp.StatusCode))
+		telemetry.RecordRemoteConfigFetch("failure", time.Since(start))
+		telemetry.RecordConfigReload("failure")
+		return WgConfig{}, fmt.Errorf("remote config returned status %s", resp.Status)
+	}
+
 	data, err := io.ReadAll(resp.Body)
 	if err != nil {
+		telemetry.RecordRemoteConfigError("read")
+		telemetry.RecordRemoteConfigFetch("failure", time.Since(start))
+		telemetry.RecordConfigReload("failure")
 		return WgConfig{}, err
 	}
 
 	var config WgConfig
 	err = json.Unmarshal(data, &config)
+	result := "success"
+	if err != nil {
+		telemetry.RecordRemoteConfigError("decode")
+		result = "failure"
+	}
+	telemetry.RecordRemoteConfigFetch(result, time.Since(start))
+	telemetry.RecordConfigReload(result)
 
 	return config, err
 }
@@ -398,6 +489,7 @@ func loadConfig(filename string) (WgConfig, error) {
 	file, err := os.Open(filename)
 	if err != nil {
 		logger.Error("Error opening file %s: %v", filename, err)
+		telemetry.RecordConfigReload("failure")
 		return WgConfig{}, err
 	}
 	defer file.Close()
@@ -416,8 +508,11 @@ func loadConfig(filename string) (WgConfig, error) {
 	err = json.Unmarshal(byteValue, &wgconfig)
 	if err != nil {
 		logger.Error("Error unmarshaling JSON data: %v", err)
+		telemetry.RecordConfigReload("failure")
 		return WgConfig{}, err
 	}
+
+	telemetry.RecordConfigReload("success")
 
 	return wgconfig, nil
 }
@@ -468,7 +563,9 @@ func ensureWireguardInterface(wgconfig WgConfig) error {
 	*config.ListenPort = wgconfig.ListenPort
 
 	// Create and configure the WireGuard interface
+	start := time.Now()
 	err = wgClient.ConfigureDevice(interfaceName, config)
+	telemetry.RecordWGApplyDuration("interface_apply", time.Since(start))
 	if err != nil {
 		return fmt.Errorf("failed to configure WireGuard device: %v", err)
 	}
@@ -622,6 +719,7 @@ func ensureMSSClamping() error {
 			errMsg := fmt.Sprintf("Failed to add MSS clamping rule for chain %s: %v (output: %s)",
 				chain, err, string(out))
 			logger.Error(errMsg)
+			telemetry.RecordFirewallApplied(chain, "failure")
 			errors = append(errors, fmt.Errorf("%s", errMsg))
 			continue
 		}
@@ -639,10 +737,12 @@ func ensureMSSClamping() error {
 			errMsg := fmt.Sprintf("Rule verification failed for chain %s: %v (output: %s)",
 				chain, err, string(out))
 			logger.Error(errMsg)
+			telemetry.RecordFirewallApplied(chain, "failure")
 			errors = append(errors, fmt.Errorf("%s", errMsg))
 			continue
 		}
 
+		telemetry.RecordFirewallApplied(chain, "success")
 		logger.Info("Successfully added and verified MSS clamping rule for chain %s", chain)
 	}
 
@@ -724,7 +824,10 @@ func addPeerInternal(peer Peer) error {
 		Peers: []wgtypes.PeerConfig{peerConfig},
 	}
 
-	if err := wgClient.ConfigureDevice(interfaceName, config); err != nil {
+	start := time.Now()
+	err = wgClient.ConfigureDevice(interfaceName, config)
+	telemetry.RecordWGApplyDuration("peer_apply", time.Since(start))
+	if err != nil {
 		return fmt.Errorf("failed to add peer: %v", err)
 	}
 
@@ -798,7 +901,10 @@ func removePeerInternal(publicKey string) error {
 		Peers: []wgtypes.PeerConfig{peerConfig},
 	}
 
-	if err := wgClient.ConfigureDevice(interfaceName, config); err != nil {
+	start := time.Now()
+	err = wgClient.ConfigureDevice(interfaceName, config)
+	telemetry.RecordWGApplyDuration("peer_apply", time.Since(start))
+	if err != nil {
 		return fmt.Errorf("failed to remove peer: %v", err)
 	}
 
@@ -994,23 +1100,26 @@ func calculatePeerBandwidth() ([]PeerBandwidth, error) {
 		}
 
 		var bytesInDiff, bytesOutDiff float64
+		var rxDelta, txDelta int64
 		lastReading, exists := lastReadings[publicKey]
 
 		if exists {
 			timeDiff := currentReading.LastChecked.Sub(lastReading.LastChecked).Seconds()
 			if timeDiff > 0 {
 				// Calculate bytes transferred since last reading
-				bytesInDiff = float64(currentReading.BytesReceived - lastReading.BytesReceived)
-				bytesOutDiff = float64(currentReading.BytesTransmitted - lastReading.BytesTransmitted)
+				rxDelta = currentReading.BytesReceived - lastReading.BytesReceived
+				txDelta = currentReading.BytesTransmitted - lastReading.BytesTransmitted
 
 				// Handle counter wraparound (if the counter resets or overflows)
-				if bytesInDiff < 0 {
-					bytesInDiff = float64(currentReading.BytesReceived)
+				if rxDelta < 0 {
+					rxDelta = currentReading.BytesReceived
 				}
-				if bytesOutDiff < 0 {
-					bytesOutDiff = float64(currentReading.BytesTransmitted)
+				if txDelta < 0 {
+					txDelta = currentReading.BytesTransmitted
 				}
 
+				bytesInDiff = float64(rxDelta)
+				bytesOutDiff = float64(txDelta)
 				// Convert to MB
 				bytesInMB := bytesInDiff / (1024 * 1024)
 				bytesOutMB := bytesOutDiff / (1024 * 1024)
@@ -1037,6 +1146,10 @@ func calculatePeerBandwidth() ([]PeerBandwidth, error) {
 			})
 		}
 
+		if rxDelta > 0 || txDelta > 0 {
+			telemetry.RecordWGBytes(interfaceName, publicKey, rxDelta, txDelta)
+		}
+
 		// Update the last reading
 		lastReadings[publicKey] = currentReading
 	}
@@ -1061,6 +1174,7 @@ func calculatePeerBandwidth() ([]PeerBandwidth, error) {
 func reportPeerBandwidth(apiURL string) error {
 	bandwidths, err := calculatePeerBandwidth()
 	if err != nil {
+		telemetry.RecordBandwidthReportCycle("failure")
 		return fmt.Errorf("failed to calculate peer bandwidth: %v", err)
 	}
 
@@ -1071,15 +1185,36 @@ func reportPeerBandwidth(apiURL string) error {
 
 	resp, err := http.Post(apiURL, "application/json", bytes.NewBuffer(jsonData))
 	if err != nil {
+		telemetry.RecordBandwidthReportCycle("failure")
 		return fmt.Errorf("failed to send bandwidth data: %v", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
+		telemetry.RecordBandwidthReportCycle("failure")
 		return fmt.Errorf("API returned non-OK status: %s", resp.Status)
 	}
 
+	telemetry.RecordBandwidthReportCycle("success")
+
 	return nil
+}
+
+func classifyRemoteConfigError(err error) string {
+	if err == nil {
+		return "none"
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) {
+		if netErr.Timeout() {
+			return "timeout"
+		}
+		return "network"
+	}
+	if errors.Is(err, io.EOF) {
+		return "eof"
+	}
+	return "unknown"
 }
 
 // notifyPeerChange sends a POST request to notifyURL with the action and public key.
@@ -1094,15 +1229,20 @@ func notifyPeerChange(action, publicKey string) {
 	data, err := json.Marshal(payload)
 	if err != nil {
 		logger.Warn("Failed to marshal notify payload: %v", err)
+		telemetry.RecordNotifyEvent("failure")
 		return
 	}
 	resp, err := http.Post(notifyURL, "application/json", bytes.NewBuffer(data))
 	if err != nil {
 		logger.Warn("Failed to notify peer change: %v", err)
+		telemetry.RecordNotifyEvent("failure")
 		return
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		logger.Warn("Notify server returned non-OK: %s", resp.Status)
+		telemetry.RecordNotifyEvent("failure")
+		return
 	}
+	telemetry.RecordNotifyEvent("success")
 }
