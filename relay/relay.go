@@ -24,20 +24,22 @@ type EncryptedHolePunchMessage struct {
 }
 
 type HolePunchMessage struct {
-	OlmID  string `json:"olmId"`
-	NewtID string `json:"newtId"`
-	Token  string `json:"token"`
+	OlmID     string `json:"olmId"`
+	NewtID    string `json:"newtId"`
+	Token     string `json:"token"`
+	PublicKey string `json:"publicKey"`
 }
 
 type ClientEndpoint struct {
-	OlmID       string `json:"olmId"`
-	NewtID      string `json:"newtId"`
-	Token       string `json:"token"`
-	IP          string `json:"ip"`
-	Port        int    `json:"port"`
-	Timestamp   int64  `json:"timestamp"`
-	ReachableAt string `json:"reachableAt"`
-	PublicKey   string `json:"publicKey"`
+	OlmID             string `json:"olmId"`
+	NewtID            string `json:"newtId"`
+	Token             string `json:"token"`
+	IP                string `json:"ip"`
+	Port              int    `json:"port"`
+	Timestamp         int64  `json:"timestamp"`
+	ReachableAt       string `json:"reachableAt"`
+	ExitNodePublicKey string `json:"exitNodePublicKey"`
+	ClientPublicKey   string `json:"publicKey"`
 }
 
 // Updated to support multiple destination peers
@@ -236,14 +238,15 @@ func (s *UDPProxyServer) packetWorker() {
 			}
 
 			endpoint := ClientEndpoint{
-				NewtID:      msg.NewtID,
-				OlmID:       msg.OlmID,
-				Token:       msg.Token,
-				IP:          packet.remoteAddr.IP.String(),
-				Port:        packet.remoteAddr.Port,
-				Timestamp:   time.Now().Unix(),
-				ReachableAt: s.ReachableAt,
-				PublicKey:   s.privateKey.PublicKey().String(),
+				NewtID:            msg.NewtID,
+				OlmID:             msg.OlmID,
+				Token:             msg.Token,
+				IP:                packet.remoteAddr.IP.String(),
+				Port:              packet.remoteAddr.Port,
+				Timestamp:         time.Now().Unix(),
+				ReachableAt:       s.ReachableAt,
+				ExitNodePublicKey: s.privateKey.PublicKey().String(),
+				ClientPublicKey:   msg.PublicKey,
 			}
 			logger.Debug("Created endpoint from packet remoteAddr %s: IP=%s, Port=%d", packet.remoteAddr.String(), endpoint.IP, endpoint.Port)
 			s.notifyServer(endpoint)
