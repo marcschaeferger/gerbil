@@ -187,6 +187,8 @@ func (s *UDPProxyServer) readPackets() {
 		n, remoteAddr, err := s.conn.ReadFromUDP(buf)
 		if err != nil {
 			logger.Error("Error reading UDP packet: %v", err)
+			// Return buffer to pool on read error to avoid leaks
+			bufferPool.Put(buf[:1500])
 			continue
 		}
 		s.packetChan <- Packet{data: buf[:n], remoteAddr: remoteAddr, n: n}
