@@ -1003,8 +1003,13 @@ func calculatePeerBandwidth() ([]PeerBandwidth, error) {
 	mu.Lock()
 	defer mu.Unlock()
 
+	// Track the set of peers currently present on the device to prune stale readings efficiently
+	currentPeerKeys := make(map[string]struct{}, len(device.Peers))
+
 	for _, peer := range device.Peers {
 		publicKey := peer.PublicKey.String()
+		currentPeerKeys[publicKey] = struct{}{}
+
 		currentReading := PeerReading{
 			BytesReceived:    peer.ReceiveBytes,
 			BytesTransmitted: peer.TransmitBytes,
@@ -1061,14 +1066,7 @@ func calculatePeerBandwidth() ([]PeerBandwidth, error) {
 
 	// Clean up old peers
 	for publicKey := range lastReadings {
-		found := false
-		for _, peer := range device.Peers {
-			if peer.PublicKey.String() == publicKey {
-				found = true
-				break
-			}
-		}
-		if !found {
+		if _, exists := currentPeerKeys[publicKey]; !exists {
 			delete(lastReadings, publicKey)
 		}
 	}
