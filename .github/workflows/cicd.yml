@@ -14,9 +14,10 @@ permissions:
 # - COSIGN_PRIVATE_KEY / COSIGN_PASSWORD / COSIGN_PUBLIC_KEY: for key-based signing
 
 on:
-  push:
-    tags:
-      - "*"
+    push:
+        tags:
+            - "[0-9]+.[0-9]+.[0-9]+"
+            - "[0-9]+.[0-9]+.[0-9]+.rc.[0-9]+"
 
 concurrency:
   group: ${{ github.ref }}
