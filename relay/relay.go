@@ -464,7 +464,7 @@ func (s *UDPProxyServer) handleWireGuardPacket(packet []byte, remoteAddr *net.UD
 
 			_, err = conn.Write(packet)
 			if err != nil {
-				logger.Error("Failed to forward handshake initiation: %v", err)
+				logger.Debug("Failed to forward handshake initiation: %v", err)
 			}
 		}
 
