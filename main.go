@@ -8,11 +8,15 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
+	_ "net/http/pprof"
 	"os"
 	"os/exec"
 	"os/signal"
+	"runtime"
+	"runtime/pprof"
 	"strconv"
 	"strings"
 	"sync"
@@ -111,6 +115,8 @@ func parseLogLevel(level string) logger.LogLevel {
 }
 
 func main() {
+	go monitorMemory(1024 * 1024 * 512) // trigger if memory usage exceeds 512MB
+
 	var (
 		err                  error
 		wgconfig             WgConfig
@@ -1280,5 +1286,27 @@ func notifyPeerChange(action, publicKey string) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		logger.Warn("Notify server returned non-OK: %s", resp.Status)
+	}
+}
+
+func monitorMemory(limit uint64) {
+	var m runtime.MemStats
+	for {
+		runtime.ReadMemStats(&m)
+		if m.Alloc > limit {
+			fmt.Printf("Memory spike detected (%d bytes). Dumping profile...\n", m.Alloc)
+
+			f, err := os.Create(fmt.Sprintf("/var/config/heap/heap-spike-%d.pprof", time.Now().Unix()))
+			if err != nil {
+				log.Println("could not create profile:", err)
+			} else {
+				pprof.WriteHeapProfile(f)
+				f.Close()
+			}
+
+			// Wait a while before checking again to avoid spamming profiles
+			time.Sleep(5 * time.Minute)
+		}
+		time.Sleep(5 * time.Second)
 	}
 }
