@@ -382,6 +382,7 @@ func main() {
 	http.HandleFunc("/update-proxy-mapping", handleUpdateProxyMapping)
 	http.HandleFunc("/update-destinations", handleUpdateDestinations)
 	http.HandleFunc("/update-local-snis", handleUpdateLocalSNIs)
+	http.HandleFunc("/healthz", handleHealthz)
 	logger.Info("Starting HTTP server on %s", listenAddr)
 
 	// HTTP server with graceful shutdown on context cancel
@@ -831,6 +832,15 @@ func handlePeer(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 	}
+}
+
+func handleHealthz(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte("ok"))
 }
 
 func handleAddPeer(w http.ResponseWriter, r *http.Request) {
