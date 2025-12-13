@@ -758,14 +758,20 @@ func (p *SNIProxy) pipe(clientConn, targetConn net.Conn, clientReader io.Reader)
 	var wg sync.WaitGroup
 	wg.Add(2)
 
+	// closeOnce ensures we only close connections once
+	var closeOnce sync.Once
+	closeConns := func() {
+		closeOnce.Do(func() {
+			// Close both connections to unblock any pending reads
+			clientConn.Close()
+			targetConn.Close()
+		})
+	}
+
 	// Copy data from client to target (using the buffered reader)
 	go func() {
 		defer wg.Done()
-		defer func() {
-			if tcpConn, ok := targetConn.(*net.TCPConn); ok {
-				tcpConn.CloseWrite()
-			}
-		}()
+		defer closeConns()
 
 		// Use a large buffer for better performance
 		buf := make([]byte, 32*1024)
@@ -778,11 +784,7 @@ func (p *SNIProxy) pipe(clientConn, targetConn net.Conn, clientReader io.Reader)
 	// Copy data from target to client
 	go func() {
 		defer wg.Done()
-		defer func() {
-			if tcpConn, ok := clientConn.(*net.TCPConn); ok {
-				tcpConn.CloseWrite()
-			}
-		}()
+		defer closeConns()
 
 		// Use a large buffer for better performance
 		buf := make([]byte, 32*1024)
