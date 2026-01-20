@@ -42,13 +42,12 @@ In single node (self hosted) Pangolin deployments this can be bypassed by using 
 
 ## CLI Args
 
+Important:
 - `reachableAt`: How should the remote server reach Gerbil's API?
 - `generateAndSaveKeyTo`: Where to save the generated WireGuard private key to persist across restarts.
-- `remoteConfig` (optional): Remote config location to HTTP get the JSON based config from. See `example_config.json`
-- `config` (optional): Local JSON file path to load config. Used if remote config is not supplied. See `example_config.json`
+- `remoteConfig`: Remote config location to HTTP get the JSON based config from.
 
-Note: You must use either `config` or `remoteConfig` to configure WireGuard.
-
+Others:
 - `reportBandwidthTo` (optional): **DEPRECATED** - Use `remoteConfig` instead. Remote HTTP endpoint to send peer bandwidth data
 - `interface` (optional): Name of the WireGuard interface created by Gerbil. Default: `wg0`
 - `listen` (optional): Port to listen on for HTTP server. Default: `:3004`
@@ -66,7 +65,6 @@ Note: You must use either `config` or `remoteConfig` to configure WireGuard.
 All CLI arguments can also be provided via environment variables:
 
 - `INTERFACE`: Name of the WireGuard interface
-- `CONFIG`: Path to local configuration file
 - `REMOTE_CONFIG`: URL of the remote config server
 - `LISTEN`: Address to listen on for HTTP server
 - `GENERATE_AND_SAVE_KEY_TO`: Path to save generated private key
