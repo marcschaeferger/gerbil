@@ -47,6 +47,7 @@ var (
 type WgConfig struct {
 	PrivateKey string `json:"privateKey"`
 	ListenPort int    `json:"listenPort"`
+	RelayPort  int    `json:"relayPort"`
 	IpAddress  string `json:"ipAddress"`
 	Peers      []Peer `json:"peers"`
 }
@@ -346,7 +347,11 @@ func main() {
 	})
 
 	// Start the UDP proxy server
-	proxyRelay = relay.NewUDPProxyServer(groupCtx, ":21820", remoteConfigURL, key, reachableAt)
+	relayPort := wgconfig.RelayPort
+	if relayPort == 0 {
+		relayPort = 21820 // in case there is no relay port set, use 21820
+	}
+	proxyRelay = relay.NewUDPProxyServer(groupCtx, fmt.Sprintf(":%d", relayPort), remoteConfigURL, key, reachableAt)
 	err = proxyRelay.Start()
 	if err != nil {
 		logger.Fatal("Failed to start UDP proxy server: %v", err)
