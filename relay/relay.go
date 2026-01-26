@@ -839,7 +839,7 @@ func (s *UDPProxyServer) clearSessionsForIP(ip string) {
 		s.wgSessions.Delete(key)
 	}
 
-	logger.Info("Cleared %d sessions for WG IP: %s", len(keysToDelete), ip)
+	logger.Debug("Cleared %d sessions for WG IP: %s", len(keysToDelete), ip)
 }
 
 // // clearProxyMappingsForWGIP removes all proxy mappings that have destinations pointing to a specific WireGuard IP
