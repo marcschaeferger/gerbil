@@ -260,6 +260,9 @@ const (
 	endpointNotifyTimeout = 10 * time.Second
 	// notifyDropWarnInterval is the minimum time between queue-full warnings.
 	notifyDropWarnInterval = 10 * time.Second
+	// initialMappingsTimeout bounds the whole get-all-relays request including
+	// streaming the (potentially 100MB+) body, so it is deliberately generous.
+	initialMappingsTimeout = 10 * time.Minute
 )
 
 // NewUDPProxyServer initializes the server with a buffered packet channel and derived context.
@@ -595,7 +598,14 @@ func (s *UDPProxyServer) decryptMessage(encMsg EncryptedHolePunchMessage) ([]byt
 func (s *UDPProxyServer) fetchInitialMappings() error {
 	logger.Info("Requesting initial proxy mappings")
 	body := bytes.NewBuffer([]byte(fmt.Sprintf(`{"publicKey": "%s"}`, s.privateKey.PublicKey().String())))
-	resp, err := http.Post(s.serverURL+"/gerbil/get-all-relays", "application/json", body)
+	ctx, cancel := context.WithTimeout(s.ctx, initialMappingsTimeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.serverURL+"/gerbil/get-all-relays", body)
+	if err != nil {
+		return fmt.Errorf("failed to create mappings request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("failed to fetch mappings: %v", err)
 	}
