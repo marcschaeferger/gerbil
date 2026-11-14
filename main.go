@@ -53,6 +53,13 @@ var (
 	disableFirewall  bool
 )
 
+// pangolinRequestTimeout bounds the small request/response calls gerbil makes
+// to Pangolin (config fetch, bandwidth reports, peer notifications) so a hung
+// server cannot block them forever.
+const pangolinRequestTimeout = 30 * time.Second
+
+var pangolinHTTPClient = &http.Client{Timeout: pangolinRequestTimeout}
+
 type WgConfig struct {
 	PrivateKey string `json:"privateKey"`
 	ListenPort int    `json:"listenPort"`
@@ -782,7 +789,7 @@ func loadRemoteConfig(url string, key wgtypes.Key, reachableAt string) (WgConfig
 	} else {
 		body = bytes.NewBuffer([]byte(fmt.Sprintf(`{"publicKey": %q, "reachableAt": %q}`, key.PublicKey().String(), reachableAt)))
 	}
-	resp, err := http.Post(url, "application/json", body)
+	resp, err := pangolinHTTPClient.Post(url, "application/json", body)
 	if err != nil {
 		// print the error
 		logger.Error("Error fetching remote config %s: %v", url, err)
@@ -1865,7 +1872,7 @@ func sendPeerBandwidthBatch(apiURL string, batch []PeerBandwidth) error {
 		return fmt.Errorf("failed to marshal bandwidth data: %v", err)
 	}
 
-	resp, err := http.Post(apiURL, "application/json", bytes.NewBuffer(jsonData))
+	resp, err := pangolinHTTPClient.Post(apiURL, "application/json", bytes.NewBuffer(jsonData))
 	if err != nil {
 		return fmt.Errorf("failed to send bandwidth data: %v", err)
 	}
@@ -1892,7 +1899,7 @@ func notifyPeerChange(action, publicKey string) {
 		logger.Warn("Failed to marshal notify payload: %v", err)
 		return
 	}
-	resp, err := http.Post(notifyURL, "application/json", bytes.NewBuffer(data))
+	resp, err := pangolinHTTPClient.Post(notifyURL, "application/json", bytes.NewBuffer(data))
 	if err != nil {
 		logger.Warn("Failed to notify peer change: %v", err)
 		return
