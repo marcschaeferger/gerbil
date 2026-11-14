@@ -28,6 +28,14 @@ jobs:
       - name: Build go
         run: go build
 
+      - name: Vet
+        run: go vet ./...
+
+      # -race is not run in CI yet: it needs cgo and a C compiler on the
+      # self-hosted runner, which this change does not assume.
+      - name: Unit tests
+        run: go test -count=1 ./...
+
       - name: Build Docker image
         run: make build
 
