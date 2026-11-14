@@ -2018,6 +2018,18 @@ func ensureIFBDevice() error {
 	return nil
 }
 
+// filterLineHasFlowID reports whether a "tc filter show" line targets exactly flowID. The token
+// after "flowid" is compared as a whole so that e.g. 1:5 does not also match 1:50 or 1:57.
+func filterLineHasFlowID(line, flowID string) bool {
+	fields := strings.Fields(line)
+	for i, field := range fields {
+		if field == "flowid" && i+1 < len(fields) {
+			return fields[i+1] == flowID
+		}
+	}
+	return false
+}
+
 // tcDeleteFiltersByFlowID removes any tc filters on dev/parent whose flowid matches flowID. Used to
 // clear out a peer's previous filter before re-adding it, so that updating a peer's bandwidth limit
 // (which re-adds the filter each time) doesn't accumulate duplicate rules pointing at the same class.
@@ -2033,7 +2045,7 @@ func tcDeleteFiltersByFlowID(dev, parent, flowID string) {
 	// filter parent 1: protocol ip pref 1 u32 chain 0 fh 800::800 order 2048 key ht 800 bkt 0 flowid 1:4
 	lines := strings.Split(string(output), "\n")
 	for _, line := range lines {
-		if !strings.Contains(line, "flowid "+flowID) || !strings.Contains(line, "fh ") {
+		if !filterLineHasFlowID(line, flowID) || !strings.Contains(line, "fh ") {
 			continue
 		}
 		parts := strings.Fields(line)
@@ -2181,7 +2193,7 @@ func removePeerBandwidthLimit(peerIP string) error {
 		lines := strings.Split(string(output), "\n")
 		for _, line := range lines {
 			// Look for lines containing our flowid (classID)
-			if strings.Contains(line, "flowid "+classID) && strings.Contains(line, "fh ") {
+			if filterLineHasFlowID(line, classID) && strings.Contains(line, "fh ") {
 				// Extract handle (format: fh 800::800)
 				parts := strings.Fields(line)
 				var handle string
@@ -2229,7 +2241,7 @@ func removePeerBandwidthLimit(peerIP string) error {
 	} else {
 		lines := strings.Split(string(output), "\n")
 		for _, line := range lines {
-			if strings.Contains(line, "flowid "+ifbClassID) && strings.Contains(line, "fh ") {
+			if filterLineHasFlowID(line, ifbClassID) && strings.Contains(line, "fh ") {
 				parts := strings.Fields(line)
 				var handle string
 				for j, part := range parts {
