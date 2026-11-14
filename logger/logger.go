@@ -35,12 +35,10 @@ func Init() *Logger {
 	return defaultLogger
 }
 
-// GetLogger returns the default logger instance
+// GetLogger returns the default logger instance. It always goes through
+// Init's sync.Once so concurrent first use does not race.
 func GetLogger() *Logger {
-	if defaultLogger == nil {
-		Init()
-	}
-	return defaultLogger
+	return Init()
 }
 
 // SetLevel sets the minimum logging level
