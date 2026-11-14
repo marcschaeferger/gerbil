@@ -1714,11 +1714,20 @@ func periodicBandwidthCheck(ctx context.Context, endpoint string) error {
 	}
 }
 
-func calculatePeerBandwidth() ([]PeerBandwidth, error) {
-	wgMu.Lock()
-	device, err := wgClient.Device(interfaceName)
-	wgMu.Unlock()
+// unreportedBandwidth holds per-peer usage (MB) not yet accepted by the remote
+// server, so deltas from a failed report are sent again next cycle. Guarded by mu.
+var unreportedBandwidth = make(map[string]PeerBandwidth)
 
+// readBandwidthDevice returns the WireGuard device whose peer counters are
+// used for bandwidth reporting. It is a variable so tests can supply readings.
+var readBandwidthDevice = func() (*wgtypes.Device, error) {
+	wgMu.Lock()
+	defer wgMu.Unlock()
+	return wgClient.Device(interfaceName)
+}
+
+func calculatePeerBandwidth() ([]PeerBandwidth, error) {
+	device, err := readBandwidthDevice()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get device: %v", err)
 	}
@@ -1760,9 +1769,11 @@ func calculatePeerBandwidth() ([]PeerBandwidth, error) {
 					bytesOutDiff = float64(currentReading.BytesTransmitted)
 				}
 
-				// Convert to MB
-				bytesInMB := bytesInDiff / (1024 * 1024)
-				bytesOutMB := bytesOutDiff / (1024 * 1024)
+				// Convert to MB and add to anything not yet reported
+				pending := unreportedBandwidth[publicKey]
+				bytesInMB := pending.BytesIn + bytesInDiff/(1024*1024)
+				bytesOutMB := pending.BytesOut + bytesOutDiff/(1024*1024)
+				unreportedBandwidth[publicKey] = PeerBandwidth{PublicKey: publicKey, BytesIn: bytesInMB, BytesOut: bytesOutMB}
 
 				// Record metrics (in bytes)
 				if bytesInDiff > 0 {
@@ -1804,8 +1815,34 @@ func calculatePeerBandwidth() ([]PeerBandwidth, error) {
 			delete(lastReadings, publicKey)
 		}
 	}
+	for publicKey := range unreportedBandwidth {
+		if _, exists := currentPeerKeys[publicKey]; !exists {
+			delete(unreportedBandwidth, publicKey)
+		}
+	}
 
 	return peerBandwidths, nil
+}
+
+// commitReportedBandwidth removes usage the remote server has accepted from
+// the unreported totals, leaving anything accumulated since in place.
+func commitReportedBandwidth(batch []PeerBandwidth) {
+	mu.Lock()
+	defer mu.Unlock()
+
+	for _, reported := range batch {
+		pending, exists := unreportedBandwidth[reported.PublicKey]
+		if !exists {
+			continue
+		}
+		pending.BytesIn -= reported.BytesIn
+		pending.BytesOut -= reported.BytesOut
+		if pending.BytesIn <= 0 && pending.BytesOut <= 0 {
+			delete(unreportedBandwidth, reported.PublicKey)
+			continue
+		}
+		unreportedBandwidth[reported.PublicKey] = pending
+	}
 }
 
 // defaultBandwidthReportBatchSize caps how many peer bandwidth readings are
@@ -1850,6 +1887,7 @@ func reportPeerBandwidth(apiURL string) error {
 			batchErrs = append(batchErrs, err)
 			continue
 		}
+		commitReportedBandwidth(bandwidths[start:end])
 		metrics.RecordBandwidthReport("success")
 	}
 
