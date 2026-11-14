@@ -133,8 +133,11 @@ func (s *WireGuardSession) UpdateLastSeen() {
 	s.LastSeen = time.Now()
 }
 
-// Type for tracking bidirectional communication patterns to rebuild sessions
+// Type for tracking bidirectional communication patterns to rebuild sessions.
+// A pattern is shared between packet workers via sync.Map; mu guards the
+// mutable fields (indices, timestamps and PacketCount).
 type CommunicationPattern struct {
+	mu             sync.Mutex
 	FromClient     *net.UDPAddr // The client address
 	ToDestination  *net.UDPAddr // The destination address
 	ClientIndex    uint32       // The receiver index seen from client
@@ -1416,6 +1419,7 @@ func (s *UDPProxyServer) trackCommunicationPattern(fromAddr, toAddr *net.UDPAddr
 		pattern := existingPattern.(*CommunicationPattern)
 
 		// Update the pattern
+		pattern.mu.Lock()
 		if fromClient {
 			pattern.LastFromClient = now
 			if pattern.ClientIndex == 0 {
@@ -1429,10 +1433,21 @@ func (s *UDPProxyServer) trackCommunicationPattern(fromAddr, toAddr *net.UDPAddr
 		}
 
 		pattern.PacketCount++
+		snapshot := &CommunicationPattern{
+			FromClient:     pattern.FromClient,
+			ToDestination:  pattern.ToDestination,
+			ClientIndex:    pattern.ClientIndex,
+			DestIndex:      pattern.DestIndex,
+			LastFromClient: pattern.LastFromClient,
+			LastFromDest:   pattern.LastFromDest,
+			PacketCount:    pattern.PacketCount,
+		}
+		pattern.mu.Unlock()
 		s.commPatterns.Store(patternKey, pattern)
 
-		// Check if we have bidirectional communication and can rebuild a session
-		s.tryRebuildSession(pattern)
+		// Check if we have bidirectional communication and can rebuild a session.
+		// Use the snapshot so the check sees a consistent view without holding the lock.
+		s.tryRebuildSession(snapshot)
 	} else {
 		// Create new pattern
 		pattern := &CommunicationPattern{
@@ -1541,28 +1556,34 @@ func (s *UDPProxyServer) cleanupIdleCommunicationPatterns() {
 		select {
 		case <-ticker.C:
 			cleanupStart := time.Now()
-			now := time.Now()
-			s.commPatterns.Range(func(key, value interface{}) bool {
-				pattern := value.(*CommunicationPattern)
-
-				// Get the most recent activity
-				lastActivity := pattern.LastFromClient
-				if pattern.LastFromDest.After(lastActivity) {
-					lastActivity = pattern.LastFromDest
-				}
-
-				// Remove patterns that haven't had activity in 20 minutes
-				if now.Sub(lastActivity) > 20*time.Minute {
-					s.commPatterns.Delete(key)
-					metrics.RecordCommPattern(relayIfname, -1)
-					metrics.RecordProxyCleanupRemoved(relayIfname, "comm_pattern", 1)
-					logger.Debug("Removed idle communication pattern: %s", key)
-				}
-				return true
-			})
+			s.removeIdleCommunicationPatterns(time.Now())
 			metrics.RecordProxyIdleCleanupDuration(relayIfname, "comm_pattern", time.Since(cleanupStart).Seconds())
 		case <-s.ctx.Done():
 			return
 		}
 	}
+}
+
+// removeIdleCommunicationPatterns drops patterns with no activity in the last 20 minutes.
+func (s *UDPProxyServer) removeIdleCommunicationPatterns(now time.Time) {
+	s.commPatterns.Range(func(key, value interface{}) bool {
+		pattern := value.(*CommunicationPattern)
+
+		// Get the most recent activity
+		pattern.mu.Lock()
+		lastActivity := pattern.LastFromClient
+		if pattern.LastFromDest.After(lastActivity) {
+			lastActivity = pattern.LastFromDest
+		}
+		pattern.mu.Unlock()
+
+		// Remove patterns that haven't had activity in 20 minutes
+		if now.Sub(lastActivity) > 20*time.Minute {
+			s.commPatterns.Delete(key)
+			metrics.RecordCommPattern(relayIfname, -1)
+			metrics.RecordProxyCleanupRemoved(relayIfname, "comm_pattern", 1)
+			logger.Debug("Removed idle communication pattern: %s", key)
+		}
+		return true
+	})
 }
