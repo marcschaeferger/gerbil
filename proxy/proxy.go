@@ -677,7 +677,7 @@ func (p *SNIProxy) handleConnection(clientConn net.Conn) {
 	// Get routing information - use original client address if available from PROXY protocol
 	var clientAddrStr string
 	if proxyInfo != nil {
-		clientAddrStr = fmt.Sprintf("%s:%d", proxyInfo.SrcIP, proxyInfo.SrcPort)
+		clientAddrStr = net.JoinHostPort(proxyInfo.SrcIP, strconv.Itoa(proxyInfo.SrcPort))
 	} else {
 		clientAddrStr = clientConn.RemoteAddr().String()
 	}
@@ -787,7 +787,8 @@ func (p *SNIProxy) getRoute(hostname, clientAddr string) (*RouteRecord, error) {
 		}, nil
 	}
 
-	// Check cache first
+	// Check cache first. Only the endpoint list is cached per hostname; the
+	// sticky endpoint is selected per client on every lookup.
 	if cached, found := p.cache.Get(hostname); found {
 		if cached == nil {
 			metrics.RecordProxyRouteLookup("cached_not_found")
@@ -795,7 +796,7 @@ func (p *SNIProxy) getRoute(hostname, clientAddr string) (*RouteRecord, error) {
 		}
 		logger.Debug("Cache hit for hostname: %s", hostname)
 		metrics.RecordProxyRouteLookup("cache_hit")
-		return cached.(*RouteRecord), nil
+		return p.buildRoute(hostname, clientAddr, cached.([]string)), nil
 	}
 
 	logger.Debug("Cache miss for hostname: %s, querying API", hostname)
@@ -858,6 +859,15 @@ func (p *SNIProxy) getRoute(hostname, clientAddr string) (*RouteRecord, error) {
 
 	endpoints := apiResponse.Endpoints
 
+	// Cache the endpoint list, not the per-client selection
+	p.cache.Set(hostname, endpoints, cache.DefaultExpiration)
+	logger.Debug("Cached endpoints for hostname: %s", hostname)
+
+	return p.buildRoute(hostname, clientAddr, endpoints), nil
+}
+
+// buildRoute builds the route for a client from the hostname's endpoint list
+func (p *SNIProxy) buildRoute(hostname, clientAddr string, endpoints []string) *RouteRecord {
 	// Default target configuration
 	targetHost := p.localProxyAddr
 	targetPort := p.localProxyPort
@@ -873,21 +883,17 @@ func (p *SNIProxy) getRoute(hostname, clientAddr string) (*RouteRecord, error) {
 		logger.Debug("Selected endpoint %s for hostname %s from client %s", selectedEndpoint, hostname, clientAddr)
 	}
 
-	route := &RouteRecord{
+	return &RouteRecord{
 		Hostname:   hostname,
 		TargetHost: targetHost,
 		TargetPort: targetPort,
 	}
-
-	// Cache the result
-	p.cache.Set(hostname, route, cache.DefaultExpiration)
-	logger.Debug("Cached route for hostname: %s", hostname)
-
-	return route, nil
 }
 
 // selectStickyEndpoint selects an endpoint using consistent hashing to ensure
-// the same client always routes to the same endpoint for load balancing
+// the same client always routes to the same endpoint for load balancing.
+// Only the client IP is hashed, so new connections (new source ports) from the
+// same client stay on the same endpoint.
 func (p *SNIProxy) selectStickyEndpoint(clientAddr string, endpoints []string) string {
 	if len(endpoints) == 0 {
 		return p.localProxyAddr
@@ -897,8 +903,13 @@ func (p *SNIProxy) selectStickyEndpoint(clientAddr string, endpoints []string) s
 	}
 
 	// Use FNV hash for consistent selection based on client address
+	clientIP := clientAddr
+	if host, _, err := net.SplitHostPort(clientAddr); err == nil {
+		clientIP = host
+	}
+
 	hash := fnv.New32a()
-	hash.Write([]byte(clientAddr))
+	hash.Write([]byte(clientIP))
 	index := hash.Sum32() % uint32(len(endpoints))
 
 	return endpoints[index]
